@@ -117,8 +117,16 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Attempts to locate the Daily Flutter plugin instance or its CallClient and
-     * invoke startScreenShare(Intent) using the granted MediaProjection permission.
+     * Attempts to locate the Daily Flutter plugin instance or its CallClient/inputs and
+     * invoke a screen-share start method using the granted MediaProjection permission.
+     *
+     * Tries a wider set of possibilities to handle API variations across plugin versions:
+     *  - CallClient.startScreenShare(Intent)
+     *  - CallClient.startScreenShare(Context, Intent)
+     *  - inputs.startScreenShare(Intent)
+     *  - inputs.startScreenShare(Context, Intent)
+     *  - DailyFlutterPlugin.startScreenShare(Intent)
+     *  - DailyFlutterPlugin.startScreenShare(Context, Intent)
      *
      * This uses guarded reflection because the plugin types are not exposed here
      * and may vary across versions. All failures are logged and safely ignored.
@@ -198,57 +206,104 @@ class MainActivity : FlutterActivity() {
 
             if (callClient == null) {
                 Log.w("MainActivity", "DailyFlutterPlugin has no accessible CallClient; skipping native startScreenShare")
-                return
+                // Don't return yet; we'll still try invoking on the plugin itself below.
             }
 
-            // 3) Invoke startScreenShare(android.content.Intent) on the CallClient.
-            try {
-                val nameCandidates = listOf(
-                    "startScreenShare",
-                    "startScreenshare",
-                    "startScreenSharing",
-                    "startShareScreen"
-                )
-                val method = callClient::class.java.methods.firstOrNull { m ->
-                    nameCandidates.any { cand -> m.name.startsWith(cand) } &&
-                        m.parameterTypes.size == 1 &&
-                        Intent::class.java.isAssignableFrom(m.parameterTypes[0])
+            // Helper lambdas for invoking start methods on arbitrary targets with different signatures
+            val tryInvokeWithIntentOnly: (Any, List<String>) -> Boolean = { target, names ->
+                try {
+                    val method = target::class.java.methods.firstOrNull { m ->
+                        names.any { cand -> m.name.startsWith(cand) } &&
+                            m.parameterTypes.size == 1 &&
+                            Intent::class.java.isAssignableFrom(m.parameterTypes[0])
+                    }
+                    if (method != null) {
+                        method.invoke(target, data)
+                        true
+                    } else false
+                } catch (t: Throwable) {
+                    Log.w("MainActivity", "Invoke with (Intent) failed on ${target::class.java.name}: ${t.message}")
+                    false
                 }
-                if (method != null) {
-                    method.invoke(callClient, data)
-                    Log.i("MainActivity", "Invoked CallClient.startScreenShare(Intent) via Daily plugin")
-                    return
+            }
+
+            val tryInvokeWithContextAndIntent: (Any, List<String>) -> Boolean = { target, names ->
+                try {
+                    val method = target::class.java.methods.firstOrNull { m ->
+                        names.any { cand -> m.name.startsWith(cand) } &&
+                            m.parameterTypes.size == 2 &&
+                            Context::class.java.isAssignableFrom(m.parameterTypes[0]) &&
+                            Intent::class.java.isAssignableFrom(m.parameterTypes[1])
+                    }
+                    if (method != null) {
+                        method.invoke(target, this@MainActivity, data)
+                        true
+                    } else false
+                } catch (t: Throwable) {
+                    Log.w("MainActivity", "Invoke with (Context, Intent) failed on ${target::class.java.name}: ${t.message}")
+                    false
+                }
+            }
+
+            val nameCandidates = listOf(
+                "startScreenShare",
+                "startScreenshare",
+                "startScreenSharing",
+                "startShareScreen",
+                // some SDKs might use more explicit names
+                "startAndroidScreenShare",
+                "startScreenShareAndroid"
+            )
+
+            // 3) Invoke on the CallClient (Intent) or (Context, Intent)
+            try {
+                if (callClient != null) {
+                    if (tryInvokeWithIntentOnly(callClient, nameCandidates)) {
+                        Log.i("MainActivity", "Invoked CallClient.startScreenShare(Intent) via Daily plugin")
+                        return
+                    }
+                    if (tryInvokeWithContextAndIntent(callClient, nameCandidates)) {
+                        Log.i("MainActivity", "Invoked CallClient.startScreenShare(Context, Intent) via Daily plugin")
+                        return
+                    }
                 }
             } catch (e: Throwable) {
                 Log.w("MainActivity", "Failed to invoke CallClient.startScreenShare(Intent): ${e.message}")
             }
 
-            // 4) Alternative shapes: a nested 'inputs' facade that exposes startScreenShare(Intent)
+            // 4) Alternative shapes: a nested 'inputs' facade
             try {
-                val inputsGetter = callClient::class.java.methods.firstOrNull { it.name == "getInputs" && it.parameterTypes.isEmpty() }
-                val inputs = inputsGetter?.invoke(callClient)
+                val inputsGetter = callClient?.let { cc -> cc::class.java.methods.firstOrNull { it.name == "getInputs" && it.parameterTypes.isEmpty() } }
+                val inputs = if (callClient != null) inputsGetter?.invoke(callClient) else null
                 if (inputs != null) {
-                    val nameCandidates = listOf(
-                        "startScreenShare",
-                        "startScreenshare",
-                        "startScreenSharing",
-                        "startShareScreen"
-                    )
-                    val m = inputs::class.java.methods.firstOrNull { mm ->
-                        nameCandidates.any { cand -> mm.name.startsWith(cand) } &&
-                            mm.parameterTypes.size == 1 &&
-                            Intent::class.java.isAssignableFrom(mm.parameterTypes[0])
-                    }
-                    if (m != null) {
-                        m.invoke(inputs, data)
+                    if (tryInvokeWithIntentOnly(inputs, nameCandidates)) {
                         Log.i("MainActivity", "Invoked inputs.startScreenShare(Intent) via Daily plugin")
+                        return
+                    }
+                    if (tryInvokeWithContextAndIntent(inputs, nameCandidates)) {
+                        Log.i("MainActivity", "Invoked inputs.startScreenShare(Context, Intent) via Daily plugin")
                         return
                     }
                 }
             } catch (_: Throwable) {
             }
 
-            Log.w("MainActivity", "No matching startScreenShare(Intent) method found on CallClient/inputs")
+            // 5) As a last resort, try invoking directly on the plugin instance
+            try {
+                if (pluginInstance != null) {
+                    if (tryInvokeWithIntentOnly(pluginInstance!!, nameCandidates)) {
+                        Log.i("MainActivity", "Invoked plugin.startScreenShare(Intent) via Daily plugin")
+                        return
+                    }
+                    if (tryInvokeWithContextAndIntent(pluginInstance!!, nameCandidates)) {
+                        Log.i("MainActivity", "Invoked plugin.startScreenShare(Context, Intent) via Daily plugin")
+                        return
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+
+            Log.w("MainActivity", "No matching startScreenShare method found on plugin/CallClient/inputs")
         } catch (t: Throwable) {
             Log.w("MainActivity", "Error while trying to route projection intent to Daily plugin: ${t.message}")
         }
