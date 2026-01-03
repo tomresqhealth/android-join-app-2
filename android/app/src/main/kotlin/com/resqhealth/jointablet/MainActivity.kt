@@ -1,6 +1,7 @@
 package com.resqhealth.jointablet
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -138,12 +139,29 @@ class MainActivity : FlutterActivity() {
             return
         }
         try {
-            // 1) Try to get the plugin registry and retrieve the Daily plugin by class
-            val pluginsField = FlutterEngine::class.java.getDeclaredField("plugins")
-            pluginsField.isAccessible = true
-            val registry = pluginsField.get(engine)
+            // 1) Try to get the plugin registry via the public API first, then fall back to fields
+            // so we don't depend on private field names across Flutter versions.
+            val getPluginsMethod = FlutterEngine::class.java.methods.firstOrNull { m ->
+                m.name == "getPlugins" && m.parameterTypes.isEmpty()
+            }
+            var registry: Any? = null
+            try {
+                if (getPluginsMethod != null) registry = getPluginsMethod.invoke(engine)
+            } catch (_: Throwable) {
+                // ignore and try private fields fallback below
+            }
             if (registry == null) {
-                Log.w("MainActivity", "FlutterEngine.plugins is null; cannot locate Daily plugin")
+                // Fallback: probe for any field that looks like a plugin registry container
+                val candidateField = FlutterEngine::class.java.declaredFields.firstOrNull { f ->
+                    f.name.contains("plugins", ignoreCase = true)
+                }
+                if (candidateField != null) {
+                    candidateField.isAccessible = true
+                    registry = candidateField.get(engine)
+                }
+            }
+            if (registry == null) {
+                Log.w("MainActivity", "No plugin registry available on FlutterEngine; cannot locate Daily plugin")
                 return
             }
 
@@ -157,24 +175,48 @@ class MainActivity : FlutterActivity() {
             var pluginInstance: Any? = null
             var pluginClass: Class<*>? = null
 
-            // The registry typically exposes a get(Class) method. Use reflection to invoke it.
+            // Try path A: registry.get(Class)
             val getMethod = registry::class.java.methods.firstOrNull { m ->
                 m.name == "get" && m.parameterTypes.size == 1 && m.parameterTypes[0] == Class::class.java
             }
-
-            for (name in candidatePluginClassNames) {
-                try {
-                    val clazz = Class.forName(name)
-                    if (getMethod != null) {
+            if (getMethod != null) {
+                for (name in candidatePluginClassNames) {
+                    try {
+                        val clazz = Class.forName(name)
                         val inst = getMethod.invoke(registry, clazz)
                         if (inst != null) {
                             pluginInstance = inst
                             pluginClass = clazz
                             break
                         }
+                    } catch (_: Throwable) {
+                        // continue to next candidate
                     }
-                } catch (e: Throwable) {
-                    // continue to next candidate
+                }
+            }
+
+            // Try path B: inspect collection fields on the registry to find a matching plugin instance
+            if (pluginInstance == null) {
+                try {
+                    val registryFields = registry::class.java.declaredFields
+                    for (f in registryFields) {
+                        try {
+                            f.isAccessible = true
+                            val value = f.get(registry) ?: continue
+                            if (value is Iterable<*>) {
+                                for (p in value) {
+                                    val cn = p?.javaClass?.name ?: continue
+                                    if (candidatePluginClassNames.any { cn == it }) {
+                                        pluginInstance = p
+                                        pluginClass = p.javaClass
+                                        break
+                                    }
+                                }
+                                if (pluginInstance != null) break
+                            }
+                        } catch (_: Throwable) { }
+                    }
+                } catch (_: Throwable) {
                 }
             }
 
