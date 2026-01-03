@@ -1,0 +1,89 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace = "com.resqhealth.jointablet"
+    compileSdk = flutter.compileSdkVersion
+    // Pin to highest required NDK to satisfy native plugins (e.g., daily_flutter)
+    ndkVersion = "27.3.13750724"
+
+    compileOptions {
+        // Use Java 17 per AGP 8 requirements
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+            // Required so R8/D8 can rewrite Java 9+ APIs (e.g., StringConcatFactory)
+            // used by transitive plugins into Android-compatible calls.
+            coreLibraryDesugaringEnabled true
+    }
+
+    kotlinOptions {
+        // Match Kotlin JVM target to 17 to satisfy toolchain validation
+        jvmTarget = '17'
+    }
+
+    signingConfigs {
+       release {
+           keyAlias keystoreProperties['keyAlias']
+           keyPassword keystoreProperties['keyPassword']
+           storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+           storePassword keystoreProperties['storePassword']
+       }
+    }
+
+    defaultConfig {
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        applicationId = "com.resqhealth.jointablet"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        // daily_flutter requires at least 24
+        minSdk = 24
+        targetSdk = flutter.targetSdkVersion
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+        // We don't use Play Store deferred components. Force the standard FlutterApplication
+        // to avoid R8 requiring Play Core SplitCompat/SplitInstall classes.
+        manifestPlaceholders += [
+            applicationName: "io.flutter.app.FlutterApplication"
+        ]
+    }
+
+    buildTypes {
+        release {
+            // Unblock Play Store deployment: disable code and resource shrinking.
+            // This avoids R8/desugaring issues introduced by transitive plugins.
+            // Once published, we can re-enable shrinking with tested keep rules.
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig = signingConfigs.release
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+    dependencies {
+        // Provide JDK backports for Android and enable desugaring. This fixes R8
+        // missing class errors like java.lang.invoke.StringConcatFactory during minify.
+        coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.3"
+
+        // No legacy Play Core dependency. Using standard FlutterApplication (see manifestPlaceholders)
+        // so SplitCompat/SplitInstall are not required. This avoids Android 14 upload errors.
+
+        // IMPORTANT: Do not add a direct co.daily:client dependency here.
+        // The daily_flutter plugin already brings the native SDK. Adding it again
+        // creates duplicate classes (e.g., co.daily.webrtc.*) and breaks release builds.
+    }

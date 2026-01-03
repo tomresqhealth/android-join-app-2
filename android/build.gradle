@@ -1,0 +1,106 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.8.1'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.0'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty("kotlin")) {
+            project.tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).all {
+                kotlinOptions { jvmTarget = "17" }
+            }
+        }
+
+        // Ensure ALL Android modules (apps and libraries, including plugin subprojects like :daily_flutter)
+        // compile Java sources with Java 17 to match Kotlin 17 and AGP 8 toolchain.
+        if (project.plugins.hasPlugin("com.android.application") || project.plugins.hasPlugin("com.android.library")) {
+            project.android {
+                compileOptions {
+                    sourceCompatibility = JavaVersion.VERSION_17
+                    targetCompatibility = JavaVersion.VERSION_17
+                }
+            }
+        }
+
+        // Do NOT set options.release for JavaCompile. AGP needs to configure bootclasspath
+        // for Android APIs. Use compileOptions/toolchains instead (handled above).
+    }
+}
+ 
+subprojects {
+    afterEvaluate { project ->
+        if (project.plugins.hasPlugin("com.android.application") ||
+                project.plugins.hasPlugin("com.android.library")) {
+            project.android {
+                compileSdkVersion 34
+            }
+        }
+        if (project.hasProperty('android')) {
+            project.android {
+                if (namespace == null) {
+                    namespace project.group
+                }
+            }
+        }
+    }
+}
+
+// IMPORTANT: Do NOT force core library desugaring on Android library/plugin modules.
+// Enabling it on libraries (e.g., :package_info_plus) triggers AGP to require multidex
+// on those modules, which is invalid. We only enable desugaring in the application
+// module (android/app/build.gradle), where multidex decisions are valid.
+
+// Removed targeted core library desugaring for :daily_flutter to simplify the build.
+// With code shrinking disabled in the app module, this workaround is no longer needed.
+
+ // Disable R8 minification specifically for the daily_flutter plugin module.
+ // The plugin's release AAR enables minify, which triggers R8 to validate
+ // Java 9+ classes (e.g., StringConcatFactory) during library minification.
+ // Libraries should defer desugaring to the application; turning off minify
+ // here avoids the missing-class error while keeping the app build clean.
+ subprojects { project ->
+     afterEvaluate {
+         if (project.name == "daily_flutter" && project.plugins.hasPlugin("com.android.library") && project.hasProperty('android')) {
+             project.android {
+                 buildTypes {
+                     release {
+                         // Avoid R8 during library packaging for daily_flutter
+                         minifyEnabled false
+                     }
+                 }
+             }
+         }
+     }
+ }
+
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
