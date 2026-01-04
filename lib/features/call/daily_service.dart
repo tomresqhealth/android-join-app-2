@@ -67,24 +67,29 @@ class DailyService {
       throw PlatformException(code: 'UNSUPPORTED_PLATFORM', message: 'Screen share is not available in web preview.');
     }
     try {
-      // The Daily Flutter SDK exposes screen share controls on its typed API.
-      // Depending on the version, this may live on CallClient or a nested
-      // inputs/media facade. We probe multiple shapes to keep compatibility
-      // across versions without crashing.
+      // New order of operations on Android:
+      // 1) Request projection permission and start foreground service
+      // 2) After grant, invoke the official SDK API from Dart (not via reflection)
       _ensureScreenshareEventsListener();
       final client = await _ensureClient();
-      debugPrint('DailyService.startScreenShare: client runtimeType=${client.runtimeType}');
-      final started = await _tryStartScreenshareOnClient(client);
-      if (started) return;
-
-      // If we reached here, the SDK in use doesn't expose screen-share APIs.
-      // Try a native bridge fallback: request MediaProjection permission and
-      // start a foreground service to keep the session alive. Note: Without a
-      // native Daily Android SDK hook, this won't publish the screen into the
-      // call yet, but it prepares the OS state correctly.
+      debugPrint('DailyService.startScreenShare: requesting projection; client=${client.runtimeType}');
       final ok = await _startScreenShareViaNativeBridge();
-      if (ok) return; // Trust the native bridge; it starts capture via the plugin
-      throw PlatformException(code: 'UNIMPLEMENTED', message: 'Screen share start is not available in this Daily SDK version.');
+      if (ok) {
+        // Guard to avoid duplicate attempt when the projectionResult event arrives.
+        if (!_projectionGrantedOnce) {
+          _projectionGrantedOnce = true;
+          final started = await _tryStartScreenshareOnClient(client);
+          if (started) return;
+        }
+        // If not started yet, the event listener will attempt once more. If that
+        // also fails, surface a clear error.
+        throw PlatformException(
+          code: 'UNIMPLEMENTED',
+          message: 'Daily SDK did not expose a screen-share API. Update the daily_flutter plugin.',
+        );
+      } else {
+        throw PlatformException(code: 'PERMISSION_DENIED', message: 'User denied or projection request failed.');
+      }
     } catch (e, st) {
       debugPrint('DailyService.startScreenShare error: $e\n$st');
       rethrow;
